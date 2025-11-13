@@ -9,6 +9,7 @@
 
 // 1. Depende da ABSTRAÇÃO, não mais do ControladorPIC.h
 #include "../interface/IControladorIRQ.h"
+#include "../interface/IProcesso.h"
 
 class CPU
 {
@@ -29,6 +30,12 @@ public:
     void registrarISR(int linha, std::function<void()> isr);
 
     /**
+     * @brief Carrega uma aplicação para ser executada pela CPU.
+     * (Simula o S.O. definindo o processo atual).
+     */
+    void carregarAplicacao(IAplicacao *app); // <-- NOVO MÉTODO
+
+    /**
      * @brief Executa um "tick" do clock da CPU.
      * Em um tick, a CPU primeiro verifica por interrupções.
      * Se houver uma, ela a executa.
@@ -44,7 +51,10 @@ private:
     // Mapeia uma linha de IRQ (int) a uma função (ISR)
     std::map<int, std::function<void()>> m_idt;
 
-    void _fazerTrabalhoFicticio();
+    // O processo/aplicação que está rodando atualmente
+    IAplicacao *m_aplicacaoAtual = nullptr; // <-- NOVO MEMBRO
+
+    // void _fazerTrabalhoFicticio();
     void _log(const std::string &mensagem);
 };
 

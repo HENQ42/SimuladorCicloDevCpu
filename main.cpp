@@ -3,113 +3,158 @@
 #include <iomanip>    // Para std::hex, std::dec
 #include <functional> // Para std::function
 
+#include <thread> // Para std::this_thread
+#include <chrono> // Para std::chrono
+
 #include "./teclado/teclado.h"
 #include "./pic/ControladorPIC.h" // (Assumindo que define ControladorPIC)
 #include "./cpu/cpu.h"
 
+#include "./interface/IProcesso.h"
+#include "./interface/IFrameBuffer.h"
+
+#include "./app/donut.h"
+
+// ---
+// --- BLOCO 1: OBJETOS MOCK (FALSOS) PARA O TESTE
+// ---
+
 /**
- * @brief Helper para "espiar" o estado atual do hardware do teclado
+ * @class MockFrameBuffer
+ * @brief Um "framebuffer" falso que implementa a interface
+ * IFrameBuffer, mas apenas imprime no console (std::cout).
  */
-void printTecladoStatus(const HardwareTeclado &teclado)
+class MockFrameBuffer : public IFrameBuffer
 {
-    uint8_t status = teclado.lerStatus();
-    uint8_t dados = teclado.lerDados();
-    bool irq = teclado.estaSinalIRQAtivo();
-
-    std::cout << "  [TESTE] MMIO Status: 0x" << std::hex << (int)status << std::dec
-              << " | MMIO Dados: 0x" << std::hex << (int)dados << std::dec;
-
-    if (status == STATUS_DADOS_PRONTOS)
+public:
+    void limpar() override
     {
-        std::cout << " ('" << (char)dados << "')";
-    }
-    else
-    {
-        std::cout << " (' ')";
+// Simula a limpeza de tela no console
+#ifdef _WIN32
+        std::system("cls");
+#else
+        std::system("clear");
+#endif
     }
 
-    std::cout << " | Fio IRQ Ativo?: " << (irq ? "SIM" : "NAO") << std::endl;
-}
+    void atualizar(const std::string &conteudo) override
+    {
+        // Imprime o "frame"
+        std::cout << "--- [FRAMEBUFFER] ---" << std::endl;
+        std::cout << conteudo << std::endl;
+        std::cout << "---------------------" << std::endl;
+    }
+};
 
-// --- Teste Principal ---
+/**
+ * @class AppProcessadorDeEco
+ * @brief Uma "aplicação" simples que implementa IAplicacao.
+ * Ela lê do buffer de entrada e "ecoA" no framebuffer.
+ */
+class AppProcessadorDeEco : public IAplicacao
+{
+private:
+    BufferDeEntradaOS *m_bufferEntrada = nullptr;
+    IFrameBuffer *m_framebuffer = nullptr;
+    std::string m_textoAtual = "Digite algo (simulando socket): ";
+
+public:
+    virtual ~AppProcessadorDeEco() = default;
+
+    void conectar(BufferDeEntradaOS *bufferEntrada, IFrameBuffer *framebuffer) override
+    {
+        m_bufferEntrada = bufferEntrada;
+        m_framebuffer = framebuffer;
+    }
+
+    void executarTick() override
+    {
+        if (!m_bufferEntrada || !m_framebuffer)
+            return;
+
+        // 1. Processar Input (se houver)
+        if (m_bufferEntrada->temDados())
+        {
+            char c = m_bufferEntrada->desenfileirarTecla();
+            m_textoAtual += c; // Adiciona a tecla ao nosso "frame"
+        }
+
+        // 2. Renderizar
+        // (Em um app real, faríamos isso em um timer, mas aqui vamos
+        // renderizar a cada tick para ver o resultado)
+        m_framebuffer->limpar();
+        m_framebuffer->atualizar(m_textoAtual);
+    }
+};
+
+// ---
+// --- BLOCO 2: O TESTE DE INTEGRAÇÃO
+// ---
+
 int main()
 {
-    std::cout << "Iniciando Simulador Completo (CPU + PIC + Teclado)..." << std::endl;
+    std::cout << "Iniciando Teste de Integração Completo (com Mocks)..." << std::endl;
     std::cout << "==================================================" << std::endl;
 
-    // --- 1. Inicialização (Boot do "Sistema") ---
-    // Cria os objetos concretos que representam o hardware
-    HardwareTeclado teclado;
+    // --- 1. Criar os "Serviços" e "Mocks" ---
+    BufferDeEntradaOS bufferDeEntrada;
+    MockFrameBuffer telaMock; // Nosso "mmap" falso
+
+    // --- 2. Criar o Hardware ---
+    HardwareTeclado teclado; // (Já é thread-safe)
     ControladorPIC pic;
+    CPU cpu(pic); // CPU depende da interface IControladorIRQ
 
-    // --- 2. "Fiação" (Injeção de Dependência) ---
+    // --- 3. Criar a Aplicação Concreta ---
+    AppProcessadorDeEco appEco;
 
-    // 2a. Injeta o PIC (concreto) na CPU (que espera a interface IControladorIRQ)
-    CPU cpu(pic);
+    // --- 4. Fazer a "Fiação" (Injeção de Dependência) ---
 
-    // 2b. Registra o hardware do teclado no canal 1 do PIC
-    pic.registrarDispositivo(1, &teclado);
-    std::cout << std::endl;
+    // 4a. Conectar Hardware
+    pic.registrarDispositivo(1, &teclado); // PIC <- Teclado (IIRQDevice)
 
-    // --- 3. "Instalação do Driver" ---
-    // O "S.O." registra a Rotina de Serviço de Interrupção (ISR)
-    // na IDT (Interrupt Descriptor Table) da CPU.
-    std::cout << "--- Instalando Driver (Registrando ISR na CPU) ---" << std::endl;
-
-    // Usamos um lambda que captura 'teclado' por referência.
-    // Este lambda é o nosso "driver" (ISR)
-    cpu.registrarISR(1, [&teclado]()
+    // 4b. Instalar o Driver (ISR)
+    cpu.registrarISR(1, [&teclado, &bufferDeEntrada]()
                      {
-        // Este é o código do nosso "driver"
-        std::cout << "  [ISR_DRIVER] IRQ 1 (Teclado) recebida! Lendo hardware..." << std::endl;
-        
-        if (teclado.lerStatus() == STATUS_DADOS_PRONTOS) {
-            uint8_t dado = teclado.lerDados();
-            std::cout << "  [ISR_DRIVER] Dado lido: 0x" << std::hex << (int)dado << std::dec << " ('" << (char)dado << "')" << std::endl;
-            
-            // "Reconhece" a leitura, o que limpa o status
-            // e permite ao hardware enviar o próximo byte (se houver).
-            teclado.eventoCPULeuDados();
-        } else {
-            std::cout << "  [ISR_DRIVER] AVISO: IRQ fantasma? Status do teclado está VAZIO." << std::endl;
-        } });
-    std::cout << std::endl;
+        // ISR lê do hardware...
+        char c = (char)teclado.lerDados();
+        // ...e coloca no buffer do SO.
+        bufferDeEntrada.enfileirarTecla(c);
+        teclado.eventoCPULeuDados(); });
 
-    // --- 4. Início da Simulação (Teste "AB") ---
-    std::cout << "--- CENARIO: Teste de Buffer (Digitacao Rapida 'AB') ---" << std::endl;
+    // 4c. Conectar a Aplicação
+    appEco.conectar(&bufferDeEntrada, &telaMock);
 
-    // --- Tick 1 (Ocioso) ---
-    std::cout << "\n--- Tick 1 (Sistema Ocioso) ---" << std::endl;
-    cpu.tick();                  // CPU não vê IRQ, faz trabalho fictício
-    printTecladoStatus(teclado); // Esperado: 0x0, 0x0, NAO
+    // 4d. Carregar a Aplicação na CPU
+    cpu.carregarAplicacao(&appEco);
 
-    // --- Evento: Usuário Digita "AB" ---
-    std::cout << "\n--- Evento: Usuário digita 'AB' ---" << std::endl;
-    teclado.eventoUsuarioDigitou("AB");
-    // Hardware processa 'A', 'B' vai pro buffer. IRQ 1 fica ATIVA.
-    printTecladoStatus(teclado); // Esperado: 0x1, 'A', SIM
+    std::cout << "Sistema montado. Iniciando simulação..." << std::endl;
+    std::this_thread::sleep_for(std::chrono::seconds(1));
 
-    // --- Tick 2 (Processa 'A') ---
-    std::cout << "\n--- Tick 2 (CPU detecta 'A') ---" << std::endl;
-    cpu.tick();                  // CPU detecta IRQ 1, pausa, chama o ISR registrado.
-                                 // O ISR lê 'A', o hardware puxa 'B' do buffer.
-                                 // IRQ 1 fica ATIVA de novo.
-    printTecladoStatus(teclado); // Esperado: 0x1, 'B', SIM
+    // --- 5. Iniciar Simulação ---
+    // Em um cenário real, o `cpu.tick()` e o `teclado.evento...`
+    // rodariam em threads separadas.
+    // Aqui, vamos simular isso em um loop único para o teste.
 
-    // --- Tick 3 (Processa 'B') ---
-    std::cout << "\n--- Tick 3 (CPU detecta 'B') ---" << std::endl;
-    cpu.tick();                  // CPU detecta IRQ 1 de novo, chama o ISR.
-                                 // O ISR lê 'B'. O buffer agora está vazio.
-                                 // IRQ 1 fica INATIVA.
-    printTecladoStatus(teclado); // Esperado: 0x0, 0x0, NAO
+    std::cout << "Simulando 'A'..." << std::endl;
+    teclado.eventoUsuarioDigitou("A"); // (Socket na Thread B)
+    cpu.tick();                        // (CPU na Thread A)
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
-    // --- Tick 4 (Ocioso de novo) ---
-    std::cout << "\n--- Tick 4 (Sistema Ocioso) ---" << std::endl;
-    cpu.tick();                  // CPU não vê IRQ, faz trabalho fictício.
-    printTecladoStatus(teclado); // Esperado: 0x0, 0x0, NAO
+    // O 1º tick da App (sem IRQ) vai consumir o 'A' do buffer
+    cpu.tick();
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+    std::cout << "Simulando 'B'..." << std::endl;
+    teclado.eventoUsuarioDigitou("B"); // (Socket)
+    cpu.tick();                        // (CPU detecta IRQ de 'B')
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+    cpu.tick(); // (App consome 'B')
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
     std::cout << "\n==================================================" << std::endl;
-    std::cout << "Todos os testes concluídos." << std::endl;
+    std::cout << "Teste de integração concluído." << std::endl;
 
     return 0;
 }

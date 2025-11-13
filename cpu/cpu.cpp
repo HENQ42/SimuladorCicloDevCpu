@@ -1,4 +1,5 @@
 #include "cpu.h"
+#include "../interface/IProcesso.h"
 
 // 1. O construtor aceita a interface
 CPU::CPU(IControladorIRQ &controlador) : m_controlador(controlador)
@@ -40,18 +41,28 @@ void CPU::tick()
     else
     {
         // --- Sem Interrupção ---
-        _fazerTrabalhoFicticio();
+        // Em vez de "trabalho fictício", executa a aplicação
+        if (m_aplicacaoAtual != nullptr)
+        {
+            m_aplicacaoAtual->executarTick(); // <-- MUDANÇA IMPORTANTE
+        }
+        else
+        {
+            // CPU ociosa, sem aplicação para rodar
+        }
     }
-}
-
-void CPU::_fazerTrabalhoFicticio()
-{
-    // Em nossa simulação, isso é instantâneo.
-    // Poderíamos adicionar um std::cout, mas poluiria o log.
-    // A ausência de um log de interrupção *é* a prova do trabalho.
 }
 
 void CPU::_log(const std::string &mensagem)
 {
     std::cout << "[CPU] " << mensagem << std::endl;
+}
+
+/**
+ * @brief Implementação do novo método
+ */
+void CPU::carregarAplicacao(IAplicacao *app)
+{
+    m_aplicacaoAtual = app;
+    _log("Aplicação carregada na CPU.");
 }
