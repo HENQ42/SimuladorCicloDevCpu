@@ -1,4 +1,4 @@
-#include "AppDonut.h"
+#include "donut.h"
 
 AppDonut::AppDonut() : m_angleA(0), m_angleB(0)
 {

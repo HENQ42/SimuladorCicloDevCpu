@@ -27,7 +27,7 @@ int ControladorPIC::verificarInterrupcoes()
         // Pergunta ao dispositivo (sem saber o que ele é): "Sinal ativo?"
         if (dispositivo != nullptr && dispositivo->estaSinalIRQAtivo())
         {
-            _log("[PIC] IRQ " + std::to_string(linha) + " ATIVA! Sinalizando CPU...");
+            _log("IRQ " + std::to_string(linha) + " ATIVA! Sinalizando CPU...");
             return linha; // Retorna a linha que precisa de atenção
         }
     }

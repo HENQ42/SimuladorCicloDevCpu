@@ -1,0 +1,8 @@
+--- SIMULADOR INICIADO ---
+[TECLADO HARDWARE] Hardware inicializado. Estado: Ocioso.
+[PIC] Controlador PIC inicializado.
+[CPU] CPU inicializada e conectada ao Controlador de IRQ.
+[PIC] Dispositivo registrado no canal IRQ 1.
+[CPU] ISR registrada na IDT para a linha IRQ 1.
+[CPU] Aplicação carregada na CPU.
+Sistema montado. Iniciando loop principal...
