@@ -1,5 +1,6 @@
 #include <iostream>
 #include <fstream>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <chrono>
@@ -11,14 +12,6 @@
 #include <websocketpp/config/asio_no_tls.hpp>
 #include <websocketpp/server.hpp>
 
-// --- Nossas Classes de Simulação (Não mudam nada) ---
-#include "./cpu/cpu.h"
-#include "./pic/ControladorPIC.h"
-#include "./teclado/teclado.h"
-#include "./buffer/BufferDeEntradaOS.h"
-#include "./app/donut.h"
-#include "./interface/IFrameBuffer.h" // Precisamos da interface
-
 // --- Configuração de Tipos WebSocket ---
 typedef websocketpp::server<websocketpp::config::asio> server;
 typedef websocketpp::connection_hdl connection_hdl;
@@ -26,36 +19,37 @@ using websocketpp::lib::placeholders::_1;
 using websocketpp::lib::placeholders::_2;
 using websocketpp::lib::bind;
 
+// --- Nossas interfaces de arquivo ---
+const std::string ARQUIVO_LOGS = "sim_logs.txt";
+const std::string ARQUIVO_FRAME = "sim_frame.txt";
+const std::string ARQUIVO_INPUT = "sim_input.txt";
+
 // ---
-// --- BLOCO 1: O "BROADCASTER" (A Ponte de Saída)
-// ---
-// Esta classe gerencia todas as conexões web e envia dados para elas.
-// Ela é thread-safe.
+// --- BLOCO 1: O "BROADCASTER"
 // ---
 
 class WebSocketBroadcaster {
 public:
-    // Adiciona uma nova conexão de cliente
     void addClient(connection_hdl hdl) {
         std::lock_guard<std::mutex> lock(m_mutex);
         m_connections.insert(hdl);
     }
 
-    // Remove um cliente que desconectou
     void removeClient(connection_hdl hdl) {
         std::lock_guard<std::mutex> lock(m_mutex);
         m_connections.erase(hdl);
     }
 
-    // Envia uma string JSON para todos os clientes conectados
     void broadcast(const std::string& jsonMessage) {
         std::lock_guard<std::mutex> lock(m_mutex);
+        if (!m_server) return;
         for (auto& hdl : m_connections) {
-            m_server->send(hdl, jsonMessage, websocketpp::frame::opcode::text);
+            // Tenta enviar. Se falhar, o cliente será removido no 'close_handler'
+            websocketpp::lib::error_code ec;
+            m_server->send(hdl, jsonMessage, websocketpp::frame::opcode::text, ec);
         }
     }
     
-    // (Precisamos dar a ela um ponteiro para o servidor depois que ele for criado)
     void setServer(server* s) { m_server = s; }
 
 private:
@@ -65,173 +59,161 @@ private:
 };
 
 // ---
-// --- BLOCO 2: AS NOVAS IMPLEMENTAÇÕES DE INTERFACE (A Ponte)
+// --- BLOCO 2: Lógica do Intermediador (O "Poller" de Arquivos)
 // ---
 
-/**
- * @class WebSocketFrameBuffer
- * @brief Implementação do IFrameBuffer que envia o frame pela web.
- */
-class WebSocketFrameBuffer : public IFrameBuffer {
-public:
-    WebSocketFrameBuffer(WebSocketBroadcaster& broadcaster) : m_broadcaster(broadcaster) {}
+WebSocketBroadcaster g_broadcaster;
+server g_ws_server;
+std::string g_ultimoFrame = "";
+std::string g_ultimosLogs = "";
+std::mutex g_file_mutex;
 
-    void limpar() override { /* Não é necessário, o \x1b[H cuida disso */ }
+std::string lerArquivo(const std::string& caminho) {
+    std::ifstream in(caminho);
+    if (!in.is_open()) return "";
+    std::stringstream buffer;
+    buffer << in.rdbuf();
+    return buffer.str();
+}
+
+std::string formatarJson(const std::string& type, const std::string& data) {
+    std::string json = "{\"type\": \"" + type + "\", \"data\": \"";
+    for (char c : data) {
+        if (c == '\"') json += "\\\"";
+        else if (c == '\\') json += "\\\\";
+        else if (c == '\n') json += "\\n";
+        else json += c;
+    }
+    json += "\"}";
+    return json;
+}
+
+/**
+ * @brief Remove o frame do donut dos logs, se estiver presente.
+ * O frame sempre começa com a sequência de escape \x1b[H.
+ */
+std::string limparDonutDosLogs(const std::string& logs) {
+    std::string cleanLogs = "";
+    std::stringstream ss(logs);
+    std::string line;
+    const std::string donutStart = "\x1b[H";
+
+    while (std::getline(ss, line)) {
+        // Se a linha começar com a sequência de escape do donut, ignore.
+        // Isso remove o frame completo do log.
+        if (line.find(donutStart) == 0) {
+            // Se encontrar a sequência, pula esta "seção" (que é o frame)
+            // e continua procurando o próximo log.
+            continue; 
+        }
+        cleanLogs += line + "\n";
+    }
+
+    // Remove a última quebra de linha extra
+    if (!cleanLogs.empty() && cleanLogs.back() == '\n') {
+        cleanLogs.pop_back();
+    }
     
-    void atualizar(const std::string& conteudo) override {
-        // Formata como o JSON que o front-end espera
-        std::string json = "{\"type\": \"frame\", \"data\": \"";
-        
-        // (Escapa caracteres especiais para JSON, como \n e ")
-        for (char c : conteudo) {
-            if (c == '\"') json += "\\\"";
-            else if (c == '\\') json += "\\\\";
-            else if (c == '\n') json += "\\n";
-            else json += c;
+    return cleanLogs;
+}
+
+
+void threadPoller() {
+    while (true) {
+        std::string frameConteudo;
+        std::string logConteudo;
+        std::string logConteudoLimpo;
+
+        {
+            std::lock_guard<std::mutex> lock(g_file_mutex);
+            frameConteudo = lerArquivo(ARQUIVO_FRAME);
+            logConteudo = lerArquivo(ARQUIVO_LOGS);
         }
-        json += "\"}";
-        
-        m_broadcaster.broadcast(json);
-    }
 
-private:
-    WebSocketBroadcaster& m_broadcaster;
-};
+        // Limpeza: Remove o frame do donut que está vazando para o log
+        logConteudoLimpo = limparDonutDosLogs(logConteudo);
 
-/**
- * @class WebSocketLogRedirect
- * @brief Um streambuf customizado que redireciona std::cout
- * para o nosso broadcaster WebSocket.
- */
-class WebSocketLogRedirect : public std::streambuf {
-public:
-    WebSocketLogRedirect(WebSocketBroadcaster& broadcaster) : m_broadcaster(broadcaster) {}
-
-protected:
-    // Chamado quando o buffer (p) está cheio ou em std::endl
-    virtual int_type overflow(int_type c = EOF) override {
-        if (c != EOF) {
-            m_buffer += static_cast<char>(c);
+        // 1. Envia o Frame (se mudou)
+        if (frameConteudo != g_ultimoFrame) {
+            g_ultimoFrame = frameConteudo;
+            g_broadcaster.broadcast(formatarJson("frame", frameConteudo));
         }
-        return c;
-    }
 
-    virtual int sync() override {
-        if (!m_buffer.empty()) {
-            // Formata como o JSON que o front-end espera
-            std::string json = "{\"type\": \"log\", \"data\": \"";
-            // (Aqui também precisaríamos escapar, mas vamos simplificar)
-            json += m_buffer;
-            json += "\"}";
-            
-            m_broadcaster.broadcast(json);
-            m_buffer.clear();
+        // 2. Envia os Logs Limpos (se mudou)
+        if (logConteudoLimpo != g_ultimosLogs) {
+            g_ultimosLogs = logConteudoLimpo;
+            g_broadcaster.broadcast(formatarJson("log", logConteudoLimpo));
         }
-        return 0; // Sucesso
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(33));
     }
+}
 
-private:
-    WebSocketBroadcaster& m_broadcaster;
-    std::string m_buffer;
-};
+// Chamado quando o front-end envia uma mensagem
+void onMessage(connection_hdl hdl, server::message_ptr msg) {
+    std::string payload = msg->get_payload();
 
-// ---
-// --- BLOCO 3: A NOVA "MAIN" (O SERVIDOR)
-// ---
+    // "Parse" de JSON
+    if (payload.find("\"type\": \"input\"") != std::string::npos) {
+        std::string tecla;
+        if (payload.find("\"key\": \"w\"") != std::string::npos) tecla = "w";
+        else if (payload.find("\"key\": \"a\"") != std::string::npos) tecla = "a";
+        else if (payload.find("\"key\": \"s\"") != std::string::npos) tecla = "s";
+        else if (payload.find("\"key\": \"d\"") != std::string::npos) tecla = "d";
+
+        if (!tecla.empty()) {
+            std::cout << "[Intermediador] Recebido input: " << tecla << ". Escrevendo em " << ARQUIVO_INPUT << std::endl;
+            std::ofstream out(ARQUIVO_INPUT, std::ios::trunc);
+            out << tecla;
+            out.close();
+        }
+    }
+    
+    // Comando para limpar o arquivo de log
+    if (payload.find("\"type\": \"clear_logs\"") != std::string::npos) {
+        std::cout << "[Intermediador] Recebido pedido para limpar logs." << std::endl;
+        {
+            std::lock_guard<std::mutex> lock(g_file_mutex);
+            std::ofstream out(ARQUIVO_LOGS, std::ios::trunc);
+            out.close();
+            g_ultimosLogs = "";
+        }
+    }
+}
+
 
 int main() {
-    // --- 1. Criar os Objetos Globais da Ponte ---
-    server ws_server;
-    ws_server.clear_access_channels(websocketpp::log::alevel::all);
-    ws_server.clear_error_channels(websocketpp::log::elevel::all);
+    std::cout << "--- Intermediador WebSocket-Arquivo Iniciado ---" << std::endl;
     
-    WebSocketBroadcaster broadcaster;
-    broadcaster.setServer(&ws_server); // Dá ao broadcaster o controle do servidor
+    g_broadcaster.setServer(&g_ws_server);
 
-    // --- 2. Redirecionar Logs ---
-    WebSocketLogRedirect logRedirect(broadcaster);
-    std::streambuf* oldCout = std::cout.rdbuf(); // Salva o cout antigo
-    std::cout.rdbuf(&logRedirect); // Redireciona!
-    std::cout.rdbuf(oldCout); // Restaura (só para o log inicial)
+    // Silencia os logs de debug do websocketpp
+    g_ws_server.clear_access_channels(websocketpp::log::alevel::all);
+
+    g_ws_server.init_asio();
+    g_ws_server.set_reuse_addr(true);
+
+    // Callbacks
+    g_ws_server.set_open_handler(bind(&WebSocketBroadcaster::addClient, &g_broadcaster, ::_1));
+    g_ws_server.set_close_handler(bind(&WebSocketBroadcaster::removeClient, &g_broadcaster, ::_1));
+    g_ws_server.set_message_handler(bind(&onMessage, ::_1, ::_2));
+
+    // --- Iniciar Threads ---
     
-    std::cout << "--- SIMULADOR INICIADO (Modo WebSocket) ---" << std::endl;
-    std::cout.rdbuf(&logRedirect); // Redireciona DE VERDADE agora
-
-    // --- 3. Criar Serviços, Hardware e Aplicação ---
-    // (Exatamente como antes)
-    BufferDeEntradaOS bufferDeEntrada;
-    WebSocketFrameBuffer tela(broadcaster); // <--- USA A NOVA INTERFACE!
-    
-    HardwareTeclado teclado; // Já é thread-safe
-    ControladorPIC pic;
-    CPU cpu(pic);
-    
-    AppDonut appDonut;
-
-    // --- 4. Fazer a "Fiação" (SOLID) ---
-    // (Exatamente como antes)
-    pic.registrarDispositivo(1, &teclado);
-    cpu.registrarISR(1, [&teclado, &bufferDeEntrada]() {
-        char c = (char)teclado.lerDados();
-        bufferDeEntrada.enfileirarTecla(c);
-        teclado.eventoCPULeuDados();
-    });
-    appDonut.conectar(&bufferDeEntrada, &tela);
-    cpu.carregarAplicacao(&appDonut);
-    
-    std::cout << "Sistema montado. Iniciando loop..." << std::endl;
-
-    // --- 5. Configurar o Servidor WebSocket ---
-    ws_server.init_asio();
-    ws_server.set_reuse_addr(true); // Permite reusar o endereço
-
-    // Callbacks do WebSocket
-    ws_server.set_open_handler(bind(&WebSocketBroadcaster::addClient, &broadcaster, ::_1));
-    ws_server.set_close_handler(bind(&WebSocketBroadcaster::removeClient, &broadcaster, ::_1));
-    
-    // Callback de Mensagem (A Ponte de Entrada)
-    ws_server.set_message_handler(
-        [&teclado](connection_hdl hdl, server::message_ptr msg) {
-        
-        std::string payload = msg->get_payload();
-        std::cout << "[WebSocket] Mensagem recebida: " << payload << std::endl;
-
-        // "Parse" de JSON (simples)
-        if (payload.find("\"type\": \"input\"") != std::string::npos) {
-            if (payload.find("\"key\": \"w\"") != std::string::npos) teclado.eventoUsuarioDigitou("w");
-            if (payload.find("\"key\": \"a\"") != std::string::npos) teclado.eventoUsuarioDigitou("a");
-            if (payload.find("\"key\": \"s\"") != std::string::npos) teclado.eventoUsuarioDigitou("s");
-            if (payload.find("\"key\": \"d\"") != std::string::npos) teclado.eventoUsuarioDigitou("d");
-        }
-        if (payload.find("\"type\": \"clear_logs\"") != std::string::npos) {
-            std::cout << "[WebSocket] Pedido de limpeza de logs (implementação futura)..." << std::endl;
-        }
+    std::thread ws_thread([]() {
+        g_ws_server.listen(8065); // Porta 8065 conforme solicitado
+        g_ws_server.start_accept();
+        g_ws_server.run();
     });
 
-    // --- 6. Iniciar Threads ---
+    std::thread file_poller_thread(threadPoller);
+
+    std::cout << "Servidor escutando na porta 8065." << std::endl;
     
-    // Thread A: Servidor WebSocket
-    std::thread ws_thread([&ws_server]() {
-        ws_server.listen(8065); // Escuta na porta 8080
-        ws_server.start_accept();
-        ws_server.run(); // Bloqueia esta thread
-        std::cout << "Servidor WebSocket parado." << std::endl;
-    });
-
-    // Thread B: Simulação da CPU
-    std::thread sim_thread([&cpu]() {
-        std::cout << "Thread da CPU iniciada." << std::endl;
-        while (true) {
-            cpu.tick();
-            std::this_thread::sleep_for(std::chrono::milliseconds(33)); // ~30 FPS
-        }
-    });
-
-    // --- 7. Esperar Threads Terminarem ---
     ws_thread.join();
-    sim_thread.join();
+    file_poller_thread.join();
     
-    std::cout.rdbuf(oldCout); // Restaura o cout
     return 0;
 }
+
 
