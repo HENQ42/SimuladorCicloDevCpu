@@ -1,8 +1,10 @@
 #include "donut.h"
 
-AppDonut::AppDonut() : m_angleA(0), m_angleB(0)
+AppDonut::AppDonut() 
+    : m_angleA(0), m_angleB(0), 
+      m_velocityA(0.0), m_velocityB(0.0) // Inicializa velocidades
 {
-    // Estado inicial dos ângulos
+    // Estado inicial dos ângulos e velocidades
 }
 
 void AppDonut::conectar(BufferDeEntradaOS *bufferEntrada, IFrameBuffer *framebuffer)
@@ -17,35 +19,36 @@ void AppDonut::executarTick()
         return; // Não executa se não estiver conectado
 
     // --- 1. Processar Inputs (Consumidor) ---
-    // (Consome TODAS as teclas no buffer)
     while (m_bufferEntrada->temDados())
     {
         char c = m_bufferEntrada->desenfileirarTecla();
+
+        // --- CORREÇÃO: Aumentamos a magnitude da "força" ---
         switch (c)
         {
         case 'w':
-            m_angleA -= 0.1;
-            break; // Rotaciona "para cima"
+            m_velocityA -= 0.1; // Era 0.01
+            break; 
         case 's':
-            m_angleA += 0.1;
-            break; // Rotaciona "para baixo"
+            m_velocityA += 0.1; // Era 0.01
+            break; 
         case 'a':
-            m_angleB -= 0.1;
-            break; // Rotaciona "para esquerda"
+            m_velocityB -= 0.1; // Era 0.01
+            break; 
         case 'd':
-            m_angleB += 0.1;
-            break; // Rotaciona "para direita"
+            m_velocityB += 0.1; // Era 0.01
+            break; 
         }
     }
 
-    // --- 2. Atualizar Estado (Spin Automático) ---
-    // (Isso faz ele girar sozinho, mesmo sem input)
-    m_angleA += 0.02;
-    m_angleB += 0.01;
+    // --- 2. Atualizar Estado (FÍSICA) ---
+    // (Esta parte já estava correta)
+    m_angleA += m_velocityA;
+    m_angleB += m_velocityB;
 
     // --- 3. Renderizar ---
     std::string frame_output;
-    frame_output.reserve(W * H + 5); // Otimização: aloca memória
+    frame_output.reserve(W * H + 5); 
 
     _renderizarFrame(frame_output);
 

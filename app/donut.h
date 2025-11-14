@@ -39,11 +39,13 @@ private:
     // --- Estado Interno da Aplicação ---
     double m_angleA;
     double m_angleB;
-    // (O ângulo C do seu código não era usado, então vamos focar em A e B)
+
+    // --- NOVO: Variáveis de Velocidade ---
+    double m_velocityA; // Velocidade de rotação no eixo A
+    double m_velocityB; // Velocidade de rotação no eixo B
 
     /**
      * @brief Renderiza um único frame do donut na string de output.
-     * (Este é o seu código, adaptado para C++ e OOP).
      */
     void _renderizarFrame(std::string &output);
 };

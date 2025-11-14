@@ -11,3 +11,5 @@ sudo pacman -S websocketpp asio openssl ncurses boost
 g++ websocket.cpp ./teclado/teclado.cpp ./pic/ControladorPIC.cpp ./cpu/cpu.cpp ./app/donut.cpp -o socketweb -std=c++17 -pthread -lssl -lcrypto
 
 g++ websocket.cpp -o socket -std=c++17 -pthread -lssl -lcrypto
+
+g++ -o listener listener.cpp -Wall
